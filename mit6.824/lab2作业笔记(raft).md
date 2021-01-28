@@ -92,86 +92,45 @@ A：一种方式是：定时检查，检查时间间隔与 心跳超时 时间�
 .
 Q：Leader Completeness 的意义
 A：Leader Completeness 特性增加的特殊之处在于，当前term 提交的记录之前的记录会被直接认为已提交，而无需再通过判断是否已复制到大多数节点上；这一特性无法避免图中d 所示情况，因为S5成为leader 时，S1 的index 3记录并未完成复制到大多数节点；但这一特性确定了旧term 记录如何完成提交（结合Raft leader在每次向follower 复制记录时，会检查两者之间有区别的记录，并强制将follower 的记录改为与leader 一致；），避免了当前leader 崩溃后，被后续节点更改旧term 记录的情况
+.
+Q：什么时候需要用锁？
+A：
+1. 不同的goroutine对同一个共享变量进行修改或读取操作
+2. for循环忙等待某事件发生，使用条件锁时，需要申请互斥锁
+3. for 循环中 锁的释放如果用 defer mu.Unlock()，需注意只有在for循环退出时才会释放锁
+4. RPC请求前需要先释放锁，避免死锁，也避免RPC请求耗时过长导致长期持有锁
 
-	// var wg sync.WaitGroup
-	// 确定一个随机的选举超时时间
-	// 若从来没接收到过心跳，或者上次心跳请求距离当前时间超过了 选举超时时间，则发起新的选举
-	for rf.state != "leader" && (rf.lastHeartBeat.IsZero() || time.Since(rf.lastHeartBeat) > time.Duration(randTimeout)*time.Millisecond) {
-		// 节点角色切换为候选者，并执行如下步骤
-		DPrintf("%v from follower to candidate", rf.me)
-		rf.state = "candidate"
-		// Candidates (§5.2):
-		// • On conversion to candidate, start election:
-		// • Increment currentTerm
-		// • Vote for self
-		// • Reset election timer
-		// • Send RequestVote RPCs to all other servers
-		// • If votes received from majority of servers: become leader
-		// • If AppendEntries RPC received from new leader: convert to
-		// follower
-		// • If election timeout elapses: start new election
+Q：什么时候用channel？
+1. 作为生产者消费者时
+2. 不建议用来唤醒其他goroutine 
 
-		// 发起新一轮选举
-		// 1. 增加term号
-		rf.currentTerm += 1
-		// 2. 投票给自己
-		rf.votedFor = me
-		// 3. 重置选举超时计时器
-		// 重置计时器动作 由 for循环+time.Sleep 实现
-		// 4. 向其他peer 发送选举请求
-		voteCount := 0
-		for index := range rf.peers {
-			if index == me {
-				continue
-			} else {
-				go func(i int) {
-					reply := RequestVoteReply{}
-					args := RequestVoteArgs{}
-					args.Term = rf.currentTerm
-					args.CandidateId = me
-					if len(rf.log) == 0 {
-						args.LastLogIndex = 0
-						args.LastLogTerm = 0
-					}
-					if rf.sendRequestVote(i, &args, &reply) {
-						voteCount++
-					}
-					if voteCount <= len(rf.peers) {
-						rf.state = "leader"
-					}
-				}(index)
-			}
-		}
+Q：什么时候用条件锁？
+1. 不同goroutine 之间唤醒时
 
-		rand.Seed(time.Now().Unix())
-		randTimeout = electionTimeout + rand.Intn(100)
-		time.Sleep(timeoutCheckPeriod)
-	}
+## Test2A
+- 运行测试案例发现选举过程中出现两个leader 的情况
+```
+2021/01/28 11:29:20 term 0 heartbeat timeout, server 2 from follower becomes candidate
+2021/01/28 11:29:20 server 2 voted itself
+2021/01/28 11:29:20 someone check server 0 state, i'm follower in term 0
+2021/01/28 11:29:20 someone check server 1 state, i'm follower in term 0
+2021/01/28 11:29:20 someone check server 2 state, i'm candidate in term 1
+2021/01/28 11:29:20 server 2 election timed out
+2021/01/28 11:29:20 term 0 heartbeat timeout, server 1 from follower becomes candidate
+2021/01/28 11:29:20 term 0 heartbeat timeout, server 0 from follower becomes candidate
+2021/01/28 11:29:20 server 0 voted itself
+2021/01/28 11:29:20 server 1 voted itself
+2021/01/28 11:29:20 server 0 change to leader, under u knee and follow my command !
+2021/01/28 11:29:20 server 0 in term 1 ready to send heartbeat
+labgob warning: Decoding into a non-default variable/field VoteGranted may not work
+2021/01/28 11:29:20 server 1 change to leader, under u knee and follow my command !
+2021/01/28 11:29:20 server 1 in term 1 ready to send heartbeat
+2021/01/28 11:29:20 server 1 change to follower
+2021/01/28 11:29:20 server 0 change to follower
+2021/01/28 11:29:20 heartbeat from server 0 in term 1 success
+2021/01/28 11:29:20 heartbeat from server 1 in term 1 success
+```
 
-	// 如下三种情况下，退出候选者状态
-	// (a) it wins the election,
-	// (b) another server establishes itself as leader,
-	// or (c) a period of time goes by with no winner.
-	// if voteCount >= len(rf.peers)/2+1 {
-	// 获得大多数选票，成为leader
-	// } else {
-	// 可能是其他候选者获得大多数选票
-	// 也可能本轮选举未选出leader，超时后再次发起新一轮选举
-	// }
-
-	// 持续判断自己是否为leader，若为leader 则定期向所有follower 发送心跳
-	for _, isLeader := rf.GetState(); isLeader; {
-		for index := range rf.peers {
-			// 发送心跳
-			go func(i int) {
-				reply := AppendEntriesReply{}
-				args := AppendEntriesArgs{}
-				args.Term = rf.currentTerm
-				args.LeaderId = rf.me
-				args.PrevLogIndex = rf.commitIndex
-				args.PrevLogTerm = rf.log[rf.commitIndex].Term
-				rf.sendAppendEntries(i, &args, &reply)
-			}(index)
-		}
-		time.Sleep(heartBeatPeriod)
-	}
+## TestReElection2A
+-  若某节点与其他节点断开网络连接，则其可能会不断尝试增加term发起选举，导致其term号非常大，若此节点再次加入集群，判断是否可以当选为leader时，lastlogindex的比较就非常重要
+-  代码通过TestInitialElection2A 后，再测试TestReElection2A，出现的现象是leader 仍在定时发送心跳，但两个follower 切换为candidate 后，无法获得多数选票，导致不断选举超时term 号不断增大
