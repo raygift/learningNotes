@@ -151,5 +151,43 @@ $
 每个 passed 对应了5个数字，分别是：测试执行的时间(s)，Raft peer 的数量（通常是 3或5），测试过程中发送的RPC数量，RPC消息中总字节数，Raft 报告提交的log entries数量。你得到的值可能与上方不同。可以选择忽略这些数字，但它们可能会有利于对 你的代码发送的RPC数量进行完整性检查。在 lab 2、3、4中，如果执行所有test超过600秒，或者执行单个测试超过120秒，测试将失败。
 
 
+## 2B 部分
+**任务：实现追加新日志记录的leader 和follower 的代码，通过go test -run 2B 测试**
 
+**提示：**
+- 运行git pull 拉取最新实验代码
+- 首要目标是通过 TestBasicAgree2B(). 先实现 Start()，然后编写代码实现通过 AppendEntires RPC 请求完成发送和接收新的日志记录，参考论文 Figure2.
+- 需要实现选举约束（论文中第5.4.1章节）
+- Lab 2B的前面几个测试失败的原因可能会是当leader 存活时仍保持重复的选举。寻找下选举定时器管理中的bug，或者不要在赢得选举后立马发送心跳
+- 可能需要重复检查一些事件是否发生的循环，不要让循环持续不停的执行，因为这会降低代码运行速度导致测试失败。在每轮循环中使用Go的条件锁，或者插入time.Sleep(10* time.Millisecond)
+- 为了完成后续lab ，代码写清楚一些。[structure](http://nil.csail.mit.edu/6.824/2020/labs/raft-structure.txt), [locking](http://nil.csail.mit.edu/6.824/2020/labs/raft-locking.txt) 和 [guide](https://thesquareplanet.com/blog/students-guide-to-raft/) 这些连接能给你一些建议。
 
+代码运行太慢可能会导致测试失败。可以使用time 命令检查实际耗时和cpu耗时。典型输出如下：
+```shell
+$ time go test -run 2B
+Test (2B): basic agreement ...
+  ... Passed --   1.6  3   18    5158    3
+Test (2B): RPC byte count ...
+  ... Passed --   3.3  3   50  115122   11
+Test (2B): agreement despite follower disconnection ...
+  ... Passed --   6.3  3   64   17489    7
+Test (2B): no agreement if too many followers disconnect ...
+  ... Passed --   4.9  5  116   27838    3
+Test (2B): concurrent Start()s ...
+  ... Passed --   2.1  3   16    4648    6
+Test (2B): rejoin of partitioned leader ...
+  ... Passed --   8.1  3  111   26996    4
+Test (2B): leader backs up quickly over incorrect follower logs ...
+  ... Passed --  28.6  5 1342  953354  102
+Test (2B): RPC counts aren't too high ...
+  ... Passed --   3.4  3   30    9050   12
+PASS
+ok      raft    58.142s
+
+real    0m58.475s
+user    0m2.477s
+sys     0m1.406s
+$
+```
+
+"ok raft 58.142s" 表示Go 检测到2B 的测试用例实际执行了58.142 秒(wall-clock)。"user 0m2.477s" 表示CPU 耗时 2.477秒，也即执行代码的实际耗时（除去CPU 等待和休眠的时间）。如果你的代码运行2B 测试用例超过现实时间1分钟，或者CPU 时间5秒，就可能会因为太慢导致失败。这时需要检查休眠或等待RPC 超时的耗时，没有休眠或等待 条件或通道消息的循环，或者大量的RPC 请求。
