@@ -163,6 +163,25 @@ Q：什么时候用条件锁？
 7. 注意到labrpc.go 中提到 除非服务端异常或网络问题，否则Call() 可以保证返回true
 8. 重新阅读lab2A 作业要求，注意到需要实现一个rf.Kill() 方法，config.go 中的crash1() 和cleanup() 调用了Kill 来对rf 的指定节点进行清理，而2A 两个测试案例都有defer cfg.cleanup() ，怀疑跟Kill 逻辑有关，未果
 9. 通过打印 labrpc.go 中 endname对应的network 的 enabled 状态，发现在节点重新加入集群后，再次发送RPC 使用的endname 与config connect 时enable 的endname 不一样，使用的endname 对应的network enabled状态仍为false，怀疑为重新加入集群的节点 索引发生了变化(rf.me)
+10. 进一步分析endname 相关逻辑，“使用port file来对每个RPC 的发送进行命名”。 config.go 中cfg.endnames[][] 二维数组记录了连接到不同服务端的所有客户端的endname，cfg.endnames[i][]记录了连到第i 个节点的客户端名称（第i 个节点作为服务端），cfg.endnames[][j]记录了j节点作为客户端连接到其他服务端 的客户端名称。执行cfg.connect(i) 是将所有i 相关的客户端标记改为enabled，但打印日志观察并未完成所有endname 的enable 操作
+11. 继续分析打印出的代码执行过程，在disconnect 两个节点后，再次connect 加入一个节点组成集群，此时个别endname 未能enabled，在labrpc.go 的Enable() 方法中，先获取rf.mu.Lock() 才能进行endname 的enable 操作，怀疑是由于长时间未获取到锁导致了RPC 响应超时返回false，此时节点在请求其他节点投票的过程中，由于被请求节点下线，RequestVote 中的锁无法被释放；
+12. 推翻 11 猜测，因为sendRequestVote 时并未持有锁，而能够处理RequestVote 时说明endname 已经enabled 了
+13. 检查是否在循环判断超时的逻辑中存在长时间等待的锁，实际在diconnect 和connect 过程中并未再次调用kill，且在labrpc.go 的Enable() 方法打印日志发现并未阻塞到rf.mu.Lock() 之前
+14. 反复测试发现针对某重连节点，无法成功呢enable 的endname 是固定的，怀疑config.go中connect 时调用enable 的逻辑有问题
+15. 推翻 14 猜测，因为测试案例首先disconnect 了两个节点，随后又重连了一个节点，因此最终未连接节点对应的endname 均disable，9个endname 中只有4个为enabled，config.go中的connect、disconnect，以及labrpc.go 中的 Enable() 方法均无问题
+16. 但通过日志观察到，虽然对应的endname 为enable，存活的两个节点之间仍然RPC 通信失败；
+17. 进一步打印日志发现，存活的节点未使用enabled 的endname 进行通信，怀疑是发送RPC 或响应RPC 时，使用的peer id 错了，日志中只能观察到使用 server 1对应的endname[1,0][1,1][1,2] 三个
+18. 日志中的报错只观察到某个节点作为服务端时，RPC 失败及endname 未enable 的报错，且并未发现peer index 使用错误的情况
+19. 多次测试发现只会打印最小的不可用server 对应的endname，再次检查计票逻辑，发现若无法获得RPC 响应就没有计入投票请求数，导致投票数量始终小于节点总数量，导致一直处于等待条件锁的状态，修改计票逻辑中发送条件锁释放信号广播的逻辑，调整前后代码见下方
+20. 调整条件锁广播逻辑后，测试通过！
+
+
+```
+// 14. re connect failed 测试记录
+重连节点1，[0,1]、[1,0]两个endname 未成功enable		4次
+重连节点0，[0,2]、[2,0]未成功enable				   4次
+```
+
 
 ``` golang
 	// 5
@@ -178,6 +197,7 @@ Q：什么时候用条件锁？
 ```
 
 ```
+// 两个节点停滞在candidate 状态
 2021/01/28 15:59:08 someone check server 0 state, i'm leader in term 4
 2021/01/28 15:59:08 someone check server 1 state, i'm follower in term 4
 2021/01/28 15:59:08 someone check server 2 state, i'm follower in term 4
@@ -254,4 +274,114 @@ connect(2)
 2021/01/29 00:07:29 enabled: false servername: 1 server: &{{0 0} map[Raft:0xc000021bc0] 24}
 2021/01/29 00:07:29 enabled: false servername: 2 server: &{{0 0} map[Raft:0xc000021cc0] 17}
 2021/01/29 00:07:29 time.AfterFunc endname: P3zBmhCvGod8ydghDsgG enabled: false servername: 1 server: &{{0 0} map[Raft:0xc000021bc0] 24}
+```
+
+```
+// 10: 节点0重新加入后，对应的5个客户端并未全部被置为enable==true
+connect(0)
+2021/01/29 14:50:44 ______________________map[-IRelwOjXcXjeCrXSUsa:false -_h5OqNdd86h-ya_Wvn0:false -haqbydhHNs7aIDziKUB:false Dzbk2qLOuk7I6kAsYhbu:false WxG2gGMV5byzCPDpBqx4:false e6ogazq1RHT1sJ4vHEhh:false gudCEV4fMMtjVStdkPEL:true m6hEDOp4VTCvS4dUSw7j:false tVj5_wgCZlQfIhk-Qzg7:true]
+2021/01/29 14:50:44 connect() enabled endname: tVj5_wgCZlQfIhk-Qzg7
+2021/01/29 14:50:44 ______________________map[-IRelwOjXcXjeCrXSUsa:false -_h5OqNdd86h-ya_Wvn0:false -haqbydhHNs7aIDziKUB:false Dzbk2qLOuk7I6kAsYhbu:false WxG2gGMV5byzCPDpBqx4:false e6ogazq1RHT1sJ4vHEhh:true gudCEV4fMMtjVStdkPEL:true m6hEDOp4VTCvS4dUSw7j:false tVj5_wgCZlQfIhk-Qzg7:true]
+2021/01/29 14:50:44 connect() enabled endname: e6ogazq1RHT1sJ4vHEhh
+2021/01/29 14:50:44 ______________________map[-IRelwOjXcXjeCrXSUsa:false -_h5OqNdd86h-ya_Wvn0:false -haqbydhHNs7aIDziKUB:false Dzbk2qLOuk7I6kAsYhbu:false WxG2gGMV5byzCPDpBqx4:false e6ogazq1RHT1sJ4vHEhh:true gudCEV4fMMtjVStdkPEL:true m6hEDOp4VTCvS4dUSw7j:false tVj5_wgCZlQfIhk-Qzg7:true]
+2021/01/29 14:50:44 connect() enabled endname: tVj5_wgCZlQfIhk-Qzg7
+2021/01/29 14:50:44 ______________________map[-IRelwOjXcXjeCrXSUsa:false -_h5OqNdd86h-ya_Wvn0:false -haqbydhHNs7aIDziKUB:false Dzbk2qLOuk7I6kAsYhbu:false WxG2gGMV5byzCPDpBqx4:true e6ogazq1RHT1sJ4vHEhh:true gudCEV4fMMtjVStdkPEL:true m6hEDOp4VTCvS4dUSw7j:false tVj5_wgCZlQfIhk-Qzg7:true]
+2021/01/29 14:50:44 connect() enabled endname: WxG2gGMV5byzCPDpBqx4
+2021/01/29 14:50:44  cfg.endnames: [[tVj5_wgCZlQfIhk-Qzg7 e6ogazq1RHT1sJ4vHEhh m6hEDOp4VTCvS4dUSw7j] [WxG2gGMV5byzCPDpBqx4 gudCEV4fMMtjVStdkPEL -_h5OqNdd86h-ya_Wvn0] [Dzbk2qLOuk7I6kAsYhbu -IRelwOjXcXjeCrXSUsa -haqbydhHNs7aIDziKUB]]
+2021/01/29 14:50:44 check one leader after 0 arises
+2021/01/29 14:50:44 someone check server 0 state, i'm candidate in term 6
+2021/01/29 14:50:44 someone check server 1 state, i'm candidate in term 6
+2021/01/29 14:50:45 wait for the reply not ok , svcMeth: Raft.RequestVote, args: &{5 1 0 0}, reply: &{0 false}, endname: WxG2gGMV5byzCPDpBqx4, rep: {false []}
+2021/01/29 14:50:45 RPC ERROR!!!!!!!!!!!!!!!!!!!!!!!!!
+```
+
+
+```
+// 16. 节点2始终存活，节点1被disconnect 后再次 connect，两个节点对应的4个 endname 为enable，但server 1发向 server 2 的RPC 请求仍然失败
+2021/01/30 13:10:33 after______________________map[5Grja9L84AhMpQzeta9r:true AEIULMx88tI-Jxewd8cT:true Cf72-OG8XXWPEqal8Gj_:true Ir_jpmg67tACNpKvEsml:false P6JlTgkPsoJzHRjrJD6X:false WVfNU13tPG3GPZkn_RYG:true YKZH1G0EyfZ9Vgt9_nAw:false gOLvuM0CJMU614Ig9qKd:false roPrlHASTLpuF4qVsM4V:false]
+2021/01/30 13:10:33 connect() enabled endname: AEIULMx88tI-Jxewd8cT
+2021/01/30 13:10:33  cfg.endnames: [[roPrlHASTLpuF4qVsM4V gOLvuM0CJMU614Ig9qKd P6JlTgkPsoJzHRjrJD6X] [YKZH1G0EyfZ9Vgt9_nAw Cf72-OG8XXWPEqal8Gj_ 5Grja9L84AhMpQzeta9r] [Ir_jpmg67tACNpKvEsml AEIULMx88tI-Jxewd8cT WVfNU13tPG3GPZkn_RYG]]
+2021/01/30 13:10:33 check one leader after 1 arises
+2021/01/30 13:10:34 wait for the reply not ok , svcMeth: Raft.RequestVote, args: &{3 1 0 0}, reply: &{0 false}, endname: Cf72-OG8XXWPEqal8Gj_, rep: {false []}
+2021/01/30 13:10:34 RPC ERROR!!!!!!!!!!!!!!!!!!!!!!!!!
+2021/01/30 13:10:34 server 1 send RPC vote request to server 1 failed
+2021/01/30 13:10:34 someone check server 1 state, i'm candidate in term 4
+2021/01/30 13:10:34 someone check server 2 state, i'm candidate in term 4
+2021/01/30 13:10:34 someone check server 1 state, i'm candidate in term 4
+2021/01/30 13:10:34 someone check server 2 state, i'm candidate in term 4
+2021/01/30 13:10:35 someone check server 1 state, i'm candidate in term 4
+2021/01/30 13:10:35 someone check server 2 state, i'm candidate in term 4
+2021/01/30 13:10:35 wait for the reply not ok , svcMeth: Raft.RequestVote, args: &{3 1 0 0}, reply: &{0 false}, endname: YKZH1G0EyfZ9Vgt9_nAw, rep: {false []}
+2021/01/30 13:10:35 RPC ERROR!!!!!!!!!!!!!!!!!!!!!!!!!
+2021/01/30 13:10:35 server 1 send RPC vote request to server 0 failed
+2021/01/30 13:10:35 someone check server 1 state, i'm candidate in term 4
+2021/01/30 13:10:35 someone check server 2 state, i'm candidate in term 4
+2021/01/30 13:10:35 wait for the reply not ok , svcMeth: Raft.RequestVote, args: &{4 2 0 0}, reply: &{0 false}, endname: AEIULMx88tI-Jxewd8cT, rep: {false []}
+2021/01/30 13:10:35 RPC ERROR!!!!!!!!!!!!!!!!!!!!!!!!!
+2021/01/30 13:10:35 server 2 send RPC vote request to server 1 failed
+2021/01/30 13:10:36 wait for the reply not ok , svcMeth: Raft.RequestVote, args: &{4 1 0 0}, reply: &{0 false}, endname: 5Grja9L84AhMpQzeta9r, rep: {false []}
+2021/01/30 13:10:36 RPC ERROR!!!!!!!!!!!!!!!!!!!!!!!!!
+2021/01/30 13:10:36 server 1 send RPC vote request to server 2 failed
+```
+
+``` golang
+// 19. 计票逻辑
+	for i := 0; i < len(rf.peers); i++ {
+		go func(peeridx int) {
+			args := RequestVoteArgs{}
+			reply := RequestVoteReply{}
+			args.Term = term
+			args.CandidateId = rf.me
+			args.LastLogIndex = len(rf.log) - 1
+			args.LastLogTerm = rf.log[len(rf.log)-1].Term
+			DPrintf("server %v request vote to server %v", rf.me, peeridx)
+			ok := rf.sendRequestVote(peeridx, &args, &reply)
+			rf.mu.Lock()
+
+//19. 修改前
+			// if ok {
+			// 	DPrintf("server %v send vote request to server %v , got %v", rf.me, peeridx, ok)
+
+			// 	rf.mu.Lock()
+			// 	if reply.VoteGranted {
+			// 		voteForMeCount++
+			// 	}
+			// 	votedCount++ // 错误代码，只有在成功收到RPC 响应才能计数，当有节点故障时，无法在获得大多数节点投票后完成当选
+			// 	cond.Broadcast() // 错误代码，只有在成功收到RPC 响应才能发送条件锁释放信号，导致在接受到所有RPC 响应时外部等待条件锁阻塞无法继续运行
+			// 	rf.mu.Unlock()
+			// } else {
+			// 	DPrintf("server %v send RPC vote request to server %v failed ", rf.me, peeridx)
+			// }
+
+// 19. 修改后
+			rf.mu.Lock()
+			if ok && reply.VoteGranted {
+				DPrintf("server %v send vote request to server %v , got %v", rf.me, peeridx, ok)
+				voteForMeCount++
+
+			} else {
+				DPrintf("server %v send RPC vote request to server %v failed ", rf.me, peeridx)
+			}
+			votedCount++
+			if voteForMeCount > len(rf.peers)/2 || votedCount >= len(rf.peers) {// 获得足够的选票后，释放条件锁
+				cond.Broadcast()
+			}
+			rf.mu.Unlock()
+
+		}(i)
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for voteForMeCount <= len(rf.peers)/2 && votedCount < len(rf.peers) {// 获得足够选票前，因条件锁而阻塞
+		DPrintf("server %v waiting the election, got %v", rf.me, voteForMeCount)
+		cond.Wait()
+	}
+
+	if voteForMeCount > len(rf.peers)/2 { // 自己获得的选票数过半，则无需继续等待其他选票
+		DPrintf("server %v win the election, got %v", rf.me, voteForMeCount)
+
+		return true
+	}
+
+
 ```
