@@ -24,4 +24,69 @@ A：raft 节点的nextIndex 和 matchIndex 分别决定了发送向follower 的�
 Q：follower 对于AppendEntries 与heartBeart 的处理，出了Entries 属性是否为空，在其他属性上的处理是否有区别？譬如heartbeat 是否需要携带正确的 leaderCommit，prevLogIndex，prevLogTerm？
 
 A：
+论文5.3“The leader keeps track of the highest index it knows to be committed, and it includes that index in future AppendEntries RPCs (including heartbeats) so that the other servers eventually find out. ”
 .
+
+Q：日志记录被大多数节点接收，和日志记录被应用到本地状态机，是否表达的意思完全一样？
+A：不完全一样，被大多数节点接收可以被应用到状态机的记录成为已提交，记录变为已提交后才能应用到状态机。
+
+论文5.3“The leader decides when it is safe to apply a log entry to the state machines; such an entry is called committed.”
+
+日志被大多数节点接收是一个集群全局状态，针对某一条日志记录，若已被leader 成功发送到大多数节点，则认为此日志记录已完成提交"commited"；
+
+日志记录被应用到本地状态机，是每个节点的局部状态；
+
+一旦一条日志记录成为已提交状态后，节点leader 将其应用到本地状态机，并向所有follower 发消息告知本条记录可以应用到各自的本地状态机
+
+一旦follower 知道leader 将日志记录应用到了本地状态机，则他们也会按照日志顺序将记录应用到自己的状态机
+
+.
+
+Q: 再议AppendEntries RPC 请求参数中prevLogIndex 的作用（做lab2a 心跳请求时已分析过一次所有RPC 参数含义，本次主要研究 prevLogIndex、commitIndex、matchIndex）
+
+A：思考日志记录从leader 流向follower 的过程实现
+
+整个日志复制过程中，leader 需要完成的任务分为4个部分：
+1. 接收新的日志记录
+2. 根据follower 已复制日志index，确定同步日志范围，并将要同步的日志记录发送给follower
+3. 将复制到大多数follower 的记录提交，应用到状态机并发送提交已完成提交的记录索引号给follower
+4. 向客户端反馈已成功应用到状态机的记录
+
+leader 为完成任务，需要具备的属性如下：
+- leader 为完成新日志记录的接收，需要有如下属性
+1. []Entry，存储新记录具体内容
+
+- leader 为完成与follower 同步日志记录，需要知道如下信息：
+1. nextIndex[i]，每个follower 的日志已完成哪些记录的复制；同步的记录范围为nextIndex[i]~len(rf.log)-1
+
+- leader 为了完成日志的提交，需要使用如下属性：
+1. commitIndex，存储已复制到大多数节点，即已提交，可应用到状态机的最大index
+2. matchIndex[i]，存储节点上持有的已提交（尚未应用）记录的最大index
+
+- 为了向客户端反馈已成功应用到状态机的记录，需要用到
+1. lastApplied，存储已应用到leader 状态机的最大index，已应用到节点的记录无法再次被修改
+
+
+整个日志复制过程中，follower 需要完成的处理分为：
+1. 判断leader 是否已失去统治
+2. 判断与leader 数据一致程度，是否与leader 记录的相符合（因为leader 是根据一致程度，决定同步给follower 的具体日志范围）
+3. 复制leader 发送来的正确范围的记录
+4. 修改此前已完成复制的记录的提交状态，并应用到状态机
+
+follower 为了完成如上处理，需要具备的属性如下：
+- 判断leader 是否已失去统治
+1. term，对比leader 的term 与自己的currentTerm
+
+- 判断与leader 数据一致程度
+1. prevLogIndex、prevLogTerm 用于判断follower 节点已存储的记录是否与leader 认为的相同
+
+- 复制leader 发送来的正确范围的记录
+1. prevLogIndex + 1 为新增加记录开始的索引号
+2. []Entry，leader 发送的具体记录内容
+
+- 更新此前已完成复制的记录的提交状态
+1. leaderCommit，leader 认为哪些记录可以已完成提交可以应用到状态机了
+
+
+
+
