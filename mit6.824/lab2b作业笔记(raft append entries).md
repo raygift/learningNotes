@@ -85,8 +85,38 @@ follower 为了完成如上处理，需要具备的属性如下：
 2. []Entry，leader 发送的具体记录内容
 
 - 更新此前已完成复制的记录的提交状态
-1. leaderCommit，leader 认为哪些记录可以已完成提交可以应用到状态机了
+1. leaderCommit，leader 认为哪些记录已完成提交可以应用到状态机了
 
+.
 
+Q：follower 接收到AppendEntries RPC 请求后的处理
 
+A：
+- 接受到AppendEntries 后，无论是否为心跳包，都需要进行如下处理：
+1. 更新自己的currnetTerm
+2. 更新自己记录的leaderId
+3. 更新可以提交的记录index
+4. 更新接到leader 心跳或日志同步请求的时间
+5. 将自己的状态切换为（或维持）follower
+- 若请求是日志同步请求，还需要进行如下处理：
+1. 修改与leader 不一致的未提交记录
+2. 追加leader 新增的日志记录
 
+Q: 再议AppendEntries RPC 请求参数中matchIndex[] 的作用
+
+A: 论文中对于matchIndex 属性的解释只有一处两句话，在图2 "Rules for Servers"的 “Leader” 部分
+
+> If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
+> 翻译：如果存在 N 满足 N > commitIndex，matchIndex 中大多数值大于N，且 log[N].term 与currentTerm 相等，则将 commitIndex置为 N
+
+向Leader 提供commitIndex 的最新值，当matchIndex 数组中记录的大多数节点对应的值都大于当前节点的 commitIndex ，且log[N] 对应的term 为当前term 时，更新commitIndex 值（由于节点只提交当前term的记录，之前term的记录被默认已提交）
+
+可以看到matchIndex 在此处的作用是：存储leader 已经完成向follower 复制的记录索引号，并在某索引号大于peer/2个之后判断已完成提交，将索引号最终同步给 commitIndex 来存储已提交记录的状态
+
+那么在代码实现时，便可以在使用goroutine 成功向各个节点并发发送新记录后，首先更新matchIndex[peerindex] 的值；在外部循环判断 matchIndex[] 中超过半数的最大值，更新到 commitIndex
+
+Q：为什么同时需要nextIndex[] 和matchIndex[] 两个数组来记录leader 和follower 的同步状态？
+
+A：
+- matchIndex 主要用于在复制entry期间判断是否超过半数已完成复制；实际使用中，leader 当选后重置所有matchIndex[]初始值为leader.log 的最大index + 1 ，且在某个leader统治期间，matchIndex 的值是单调增加的，不会变小
+- nextIndex 主要用于leader 判断向follower 发送哪些entries；实际使用中，leader 当选后重置所有matchIndex[]初始值为0 ，在follower 复制滞后时，nextIndex 需要减小以便判断与leader 保持一致的entry 最大的index
