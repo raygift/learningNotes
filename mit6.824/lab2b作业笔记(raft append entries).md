@@ -107,6 +107,7 @@ Q: 再议AppendEntries RPC 请求参数中matchIndex[] 的作用
 A: 论文中对于matchIndex 属性的解释只有一处两句话，在图2 "Rules for Servers"的 “Leader” 部分
 
 > If there exists an N such that N > commitIndex, a majority of matchIndex[i] ≥ N,and log[N].term == currentTerm: set commitIndex = N (§5.3, §5.4).
+> 
 > 翻译：如果存在 N 满足 N > commitIndex，matchIndex 中大多数值大于N，且 log[N].term 与currentTerm 相等，则将 commitIndex置为 N
 
 向Leader 提供commitIndex 的最新值，当matchIndex 数组中记录的大多数节点对应的值都大于当前节点的 commitIndex ，且log[N] 对应的term 为当前term 时，更新commitIndex 值（由于节点只提交当前term的记录，之前term的记录被默认已提交）
@@ -120,3 +121,16 @@ Q：为什么同时需要nextIndex[] 和matchIndex[] 两个数组来记录leader
 A：
 - matchIndex 主要用于在复制entry期间判断是否超过半数已完成复制；实际使用中，leader 当选后重置所有matchIndex[]初始值为leader.log 的最大index + 1 ，且在某个leader统治期间，matchIndex 的值是单调增加的，不会变小
 - nextIndex 主要用于leader 判断向follower 发送哪些entries；实际使用中，leader 当选后重置所有matchIndex[]初始值为0 ，在follower 复制滞后时，nextIndex 需要减小以便判断与leader 保持一致的entry 最大的index
+
+
+Q：检查 matchIndex[] 中哪些index 复制超过半数的逻辑，是否需要单独一个goroutine？
+
+A：如果不单独goroutine 执行，只能在发送AppendEntries 的goroutine 中，在得到RPC 响应后更新计数并判断是否已提交。但此做法的问题是只有在有新记录写入时，才会触发Leader 发送AppendEntries ，如果某次新增记录的同步未完成，会阻塞leader 接收后续新增记录
+
+Q：分析 lastApplied
+
+A：
+- 作用：所有节点都有lastApplied，用来记忆已经完成提交并应用到本地状态机的entry
+- 更新：独立一个goroutine 持续判断是否rf.commitIndex > rf.lastApplied，若满足则使用较大的 rf.commitIndex 更新 rf.lastApplied
+- 更新后向applyCh 依次发送所有完成apply 的命令
+
