@@ -134,3 +134,63 @@ A：
 - 更新：独立一个goroutine 持续判断是否rf.commitIndex > rf.lastApplied，若满足则使用较大的 rf.commitIndex 更新 rf.lastApplied
 - 更新后向applyCh 依次发送所有完成apply 的命令
 
+## TestFailAgree2B
+
+现象：cfg.one() retry 为true 时，会出现重复记录cmd 106的情况，导致报 “out of order” 错误
+
+```golang
+	cfg.one(106, servers, true)
+```
+
+```
+2021/02/07 15:14:01 rf.Start(106) ok: true ,index1: 7
+2021/02/07 15:14:01 somebody claimed to be the leader and to have submitted our command; wait a while for agreement.
+2021/02/07 15:14:01 server 1 in term 3 ready to send append entries, log: [{0 <nil>} {1 101} {1 102} {1 103} {1 104} {1 105} {1 106} {3 106}]
+.
+.
+.
+2021/02/08 21:45:37 apply error: server 1 apply out of order 7
+```
+
+config.go 中对于 retry 有如下注释
+
+> // if retry==true, may submit the command multiple		// 如果 retry==true，可能会多次提交命令
+> 
+> // times, in case a leader fails just after Start().	// 以避免leader 在Start() 之后就发生了异常
+
+通过分析如下几个问题解决错误：
+
+1. config.go 中如何控制重发 106 命令的？
+
+    config.go 中的 one() 方法在10秒内会不断重试，若retry 为false ，则在任意server中检测到2秒后nCommitted(收到的命令对应index) 与提交的cmd 仍不一致时，会在 控制10秒的一次循环之后完后，再次对相同的cmd 执行Start(cmd)；若 retry 为true ，则对于上述情况（超过2秒但小于10秒未能读取到发送的cmd），不会再次执行Start，而是直接报错
+
+2. "out of order" 什么意思？
+
+    在2秒内，由客户端发送的cmd 并未被复制到集群中所有节点上；此时会尝试再次发送cmd 106，从而导致第二次记录的106对应的index 并不是预期的序号6
+
+3. 将106、107 retry 标志改为false，测试会由于在写入106 时无法达成一致而测试失败
+
+```
+--- FAIL: TestFailAgree2B (4.39s)
+    config.go:508: one(106) failed to reach agreement
+```
+
+4. 观察日志还有有大量由于 leader 的nextIndex[peerid] 大于 follower 的 log 长度，且出现数量与发送日志的次数不一致
+
+    分析发现是发送心跳且遇到nextIndex 不一致时，没有对nextIndex[peerid] 进行递减更新
+
+5. 调整nextIndex 后发现正确的nextIndex 只有在客户端发送下一次 cmd 时才会进行同步，原因是同步日志的命令循环等待 新cmd 的条件锁触发
+
+修改同步日志逻辑，尝试在每次缩小nextIndex 后同样触发一次logCond，使得leader 向follower 同步Entries
+
+```
+	// 单独一个goroutine
+	// 作为leader ，当收到新的日志记录时，向follower 同步日志
+    	go func() {
+
+        }
+```
+
+Q：问题：“follower 被disconnect 后再re-join ，是否会立刻发起新一轮选举影响当前term？”
+
+    A：follower 被disconnect ，但节点仍存活，判断心跳超时后会term+1 成为候选者，因此再次加入集群时会影响当前leader，但如果此follower 落后的日志太多，不包含某一条已提交的日志，则由于 Leader Completeness Property 无法当选为leader
