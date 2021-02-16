@@ -302,6 +302,28 @@ A：ApplyMsg 的注释明确了每个节点在日志提交后都需要发送appl
 	}
 	rf.mu.Lock()
 	rf.lastApplied = commit // 此处不会等到本地所有已经commit 未applied 的entry 全部apply 后才会执行，而是在创建goroutin 后就直接执行，导致未apply 就更新了lastApplied 
-	rf.mu.Unlock()
+    rf.mu.Unlock()
+}
 
+
+// 修改后
+	if last < commit {
+		// 发出完成提交的信号
+		for i := 0; i <= commit-last; i++ {
+			num := i
+			// go func(num int) {
+			if last+num < l {
+				var am ApplyMsg
+				am.CommandValid = true
+				am.Command = rf.log[last+num].Command
+				am.CommandIndex = last + num
+				DPrintf("committed, applymsg %v", am)
+				applyCh <- am
+				rf.mu.Lock()
+				rf.lastApplied = last + num
+				rf.mu.Unlock()
+			}
+			// }(i)
+		}
+	}
 ```
