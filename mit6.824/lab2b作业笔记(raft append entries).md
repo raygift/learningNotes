@@ -194,3 +194,114 @@ config.go 中对于 retry 有如下注释
 Q：问题：“follower 被disconnect 后再re-join ，是否会立刻发起新一轮选举影响当前term？”
 
     A：follower 被disconnect ，但节点仍存活，判断心跳超时后会term+1 成为候选者，因此再次加入集群时会影响当前leader，但如果此follower 落后的日志太多，不包含某一条已提交的日志，则由于 Leader Completeness Property 无法当选为leader
+
+
+Q：问题，对于reconnect 重新加入的节点，由于日志内容落后较多，leader 递减nextIndex 并完成同步后，cfg.log[peeridx] 对应的内容并未与rf.log 一致，从而导致仍会出现 "out of order"
+
+```
+2021/02/13 19:05:45 server 1 in term 2 ready to send append entries, log: [{0 <nil>} {1 101} {1 102} {1 103} {1 104} {1 105}]
+2021/02/13 19:05:45 server 0 got append entries RPC, before this rf.log is : [{0 <nil>} {1 101}]
+2021/02/13 19:05:45 server 0 got append entries : [{1 102} {1 103} {1 104} {1 105}], after this rf.log is : [{0 <nil>} {1 101} {1 102} {1 103} {1 104} {1 105}]
+2021/02/13 19:05:45 appendentries from server 1 to peer 2 in term 2 success
+2021/02/13 19:05:45 appendentries from server 1 to peer 0 in term 2 success
+2021/02/13 19:05:45 appendentries from server 1 to peer 1 in term 2 success
+2021/02/13 19:05:45 nCommitted failed , nd: 0 , cmd: 106
+2021/02/13 19:05:45 nCommitted failed , nd: 0 , cmd: 106
+2021/02/13 19:05:45 nCommitted failed , nd: 0 , cmd: 106
+2021/02/13 19:05:45 nCommitted failed , nd: 0 , cmd: 106
+2021/02/13 19:05:45 committed, applymsg {true 103 3}
+2021/02/13 19:05:45 committed, applymsg {true 104 4}
+2021/02/13 19:05:45 committed, applymsg {true 102 2}
+2021/02/13 19:05:45 committed, applymsg {true 105 5}
+2021/02/13 19:05:45 apply error: server 0 apply out of order 3, cfg.logs[0]=map[1:101 3:103]
+
+```
+A： 分析cfg.log[peeridx] 与raft 节点同步entry 的逻辑
+
+在config.go 的start1 方法中，有独立的goroutine 循环接收 applyCh 中传递的消息，并将消息的command 应用到各个cfg.log 数组，当
+
+```golang
+	go func() {
+		for m := range applyCh {
+            // some other codes
+				v := m.Command
+                cfg.mu.Lock()
+                // some other codes
+				for j := 0; j < len(cfg.logs); j++ {
+                    // some other codes
+        			cfg.logs[i][m.CommandIndex] = v //
+
+```
+
+
+
+Q：bug，发现leader 后退nextIndex 时会退过头，原因是定时心跳attemptHeartbeat 中的回退逻辑 和 定时同步日志attemptAppendEntries 的回退逻辑都会判断nextIndex 是否需要回退，两部分代码在判断回退和执行回退时，没有控制在同一个原子操作中，导致多执行了回退
+
+A：解决办法，考虑定时心跳与 定时同步日志 是否可以在一个方法中实现；
+
+【视频课程Fault Tolerance 中提到】更新提交状态可以在定时心跳 或下一次客户端发送请求时，同步到其他follower
+
+```
+2021/02/13 19:20:18 leader 1 记录的 nextindex 与 follower 0 的len 不符 ，则 follower 拒绝该请求: len(rf.log): 2, args.PrevLogIndex: 4, args.PrevLogTerm: 1
+2021/02/13 19:20:18 server 1 send appendEntries to peer 0 failed because follower disagree nextIndex
+2021/02/13 19:20:18 leader 1 记录的 nextindex 与 follower 0 的len 不符 ，则 follower 拒绝该请求: len(rf.log): 2, args.PrevLogIndex: 4, args.PrevLogTerm: 1
+2021/02/13 19:20:18 appendentries from server 1 to peer 2 in term 2 success
+2021/02/13 19:20:18 appendentries from server 1 to peer 1 in term 2 success
+2021/02/13 19:20:18 server 1 send appendEntries to peer 0 failed because follower disagree nextIndex
+2021/02/13 19:20:18 nCommitted failed , nd: 0 , cmd: 106
+2021/02/13 19:20:18 nCommitted failed , nd: 0 , cmd: 106
+2021/02/13 19:20:18 nCommitted failed , nd: 0 , cmd: 106
+2021/02/13 19:20:18 nCommitted failed , nd: 0 , cmd: 106
+2021/02/13 19:20:18 nCommitted failed , nd: 0 , cmd: 106
+2021/02/13 19:20:18 server 1 in term 2 ready to send append entries, log: [{0 <nil>} {1 101} {1 102} {1 103} {1 104} {1 105} {1 106}]
+2021/02/13 19:20:18 leader 1 记录的 nextindex 与 follower 0 的len 不符 ，则 follower 拒绝该请求: len(rf.log): 2, args.PrevLogIndex: 2, args.PrevLogTerm: 1
+2021/02/13 19:20:18 server 1 send appendEntries to peer 0 failed because follower disagree nextIndex
+2021/02/13 19:20:18 appendentries from server 1 to peer 1 in term 2 success
+2021/02/13 19:20:18 leader 1 记录的 nextindex 与 follower 0 的len 不符 ，则 follower 拒绝该请求: len(rf.log): 2, args.PrevLogIndex: 2, args.PrevLogTerm: 1
+2021/02/13 19:20:18 server 1 send appendEntries to peer 0 failed because follower disagree nextIndex
+2021/02/13 19:20:18 appendentries from server 1 to peer 2 in term 2 success
+2021/02/13 19:20:18 nCommitted failed , nd: 0 , cmd: 106
+2021/02/13 19:20:18 nCommitted failed , nd: 0 , cmd: 106
+2021/02/13 19:20:18 nCommitted failed , nd: 0 , cmd: 106
+2021/02/13 19:20:18 nCommitted failed , nd: 0 , cmd: 106
+2021/02/13 19:20:18 server 1 in term 2 ready to send append entries, log: [{0 <nil>} {1 101} {1 102} {1 103} {1 104} {1 105} {1 106}]
+2021/02/13 19:20:18 appendentries from server 1 to peer 1 in term 2 success
+2021/02/13 19:20:18 server 0 got append entries RPC, before this rf.log is : [{0 <nil>} {1 101}]
+2021/02/13 19:20:18 server 0 got append entries : [{1 101} {1 102} {1 103} {1 104} {1 105} {1 106}], after this rf.log is : [{0 <nil>} {1 101} {1 101} {1 102} {1 103} {1 104} {1 105} {1 106}]
+```
+
+
+
+Q：有关ApplyMsg 的发送逻辑
+
+A：ApplyMsg 的注释明确了每个节点在日志提交后都需要发送apply 信号
+
+// ApplyMsg
+//   each time a new entry is committed to the log, each Raft peer
+//   should send an ApplyMsg to the service (or tester)
+//   in the same server.
+
+## 惊天bug
+
+由于TestFailAgree2B 始终无法通过阻塞了好久，终于在检查每个节点向AppleMsg 发送消息时的惊天bug（新goroutine 与当前goroutine 逻辑执行顺序），原始代码如下，原本是想使用goroutine 提高apply 的速度，但未使用条件锁；将代码去掉goroutine 改为顺序从上到下执行后test passed！
+
+```golang
+	if last < commit {
+	// 发出完成提交的信号
+	for i := 0; i <= commit-last; i++ {
+		go func(num int) {
+			if last+num < l {
+				var am ApplyMsg
+				am.CommandValid = true
+				am.Command = rf.log[last+num].Command
+				am.CommandIndex = last + num
+				DPrintf("committed, applymsg %v", am)
+				applyCh <- am
+			}
+		}(i)
+	}
+	rf.mu.Lock()
+	rf.lastApplied = commit // 此处不会等到本地所有已经commit 未applied 的entry 全部apply 后才会执行，而是在创建goroutin 后就直接执行，导致未apply 就更新了lastApplied 
+	rf.mu.Unlock()
+
+```
