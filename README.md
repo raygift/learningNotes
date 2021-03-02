@@ -13,5 +13,6 @@
   - lab1作业笔记(mapreduce)
   - lab2a作业笔记(raft election)
   - lab2b作业笔记(raft append entries)
+  - Students' Guide to Raft笔记
 
 - [翻译]Go 内存模型
