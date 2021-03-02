@@ -56,3 +56,6 @@ A：收到AppendEntries RPC后，需要做如下几个操作
 
 ____
 
+Q：处理AppendEntries RPC 时，检查min的必要性
+
+A：在执行到log 结尾时，仅仅将从lastApplied 到commitIndex 进行命令应用的方法终止是不够的。因为在leader 将entries 发送给follower后（与follower 本地entries 都匹配），你的日志中可能存在与leader 有冲突的entries【ps：虽然leader 将entries 发送过来，但follower 可能未完全追加到自己的log 中，导致与leader 不一致】。由于第三步#3 决定了follower 只会删除与leader 冲突的entries，而如果leaderCommit 超过了 leader 发送给你的entries 的index，你可能会应用错误的entries。
