@@ -191,3 +191,51 @@ $
 ```
 
 "ok raft 58.142s" 表示Go 检测到2B 的测试用例实际执行了58.142 秒(wall-clock)。"user 0m2.477s" 表示CPU 耗时 2.477秒，也即执行代码的实际耗时（除去CPU 等待和休眠的时间）。如果你的代码运行2B 测试用例超过现实时间1分钟，或者CPU 时间5秒，就可能会因为太慢导致失败。这时需要检查休眠或等待RPC 超时的耗时，没有休眠或等待 条件或通道消息的循环，或者大量的RPC 请求。
+
+## 2C 部分
+
+如果基于Raft 的节点重启，它应该表现的像它离开时那样。这需要Raft 在重启时仍能保存持久化状态。论文的图2提到了有哪些状态需要持久化。
+
+现实中对于Raft 的实现会在持久化状态每次改变时将状态保存到磁盘上，当重启时从磁盘读取状态。本实验中不用使用磁盘；取而代之，使用Persister 对象来实现存储和回读。调用Raft.Make() 的代码会提供Persister ，初始时持有Raft 最近的持久化状态（如果存在）。Raft 应该从Persister 初始化它的状态，且应该在状态变化时使用Persister 存储持久化状态。使用Persister 的ReadRaftState() 和 SaveRaftState() 方法。
+
+**任务1**
+
+完成raft.go 中的persist() 函数 和 readPersist() 函数，增加存储和读取持久化状态的代码。为了将状态传递给Persister，你需要将状态当作字节的数组进行 encode(或序列化"serialize")。使用labgod encoder；阅读 persist() 和readPersist() 中的注释。labgob 类似 Go 的 gob encoder，但如果你尝试对带有小写属性名称的结构体进行编码，labgob 会打印出错误信息。
+
+**任务2**
+
+在你Raft 代码中改变持久化状态的地方增加对persist() 的调用。一旦这么做了之后，应该可以通过剩下的测试用例。
+
+**注意**
+
+为了避免内存溢出，Raft 必须定期删除旧日志entries，但在下个lab 之前，你都暂时不需要担心这个问题。
+
+- 提示1: 运行git pull 来获取最新代码
+- 提示2: 很多2C 测试用例会引起节点异常，或者网络丢失RCP 请求或响应
+- 提示3: 可能需要优化nextIndex 一次一个entry的回退速度。阅读Raft 论文第7页底部和第8页顶部灰色部分。论文中对于细节没有详细描述；你需要填补这部分空缺，或许需要6.824 课程的一些帮助。
+- 提示4: 执行完Lab 2 所有测试用例（2A+2B+2C）的合理时间是4分钟的实际时间，其中CPU 执行时间 1 分钟
+
+你需要通过所有 2C 的测试用例（如下所示），如同通过2A 和2B 测试用例一样。
+
+```shell
+$ go test -run 2C
+Test (2C): basic persistence ...
+  ... Passed --   7.2  3  206   42208    6
+Test (2C): more persistence ...
+  ... Passed --  23.2  5 1194  198270   16
+Test (2C): partitioned leader and one follower crash, leader restarts ...
+  ... Passed --   3.2  3   46   10638    4
+Test (2C): Figure 8 ...
+  ... Passed --  35.1  5 9395 1939183   25
+Test (2C): unreliable agreement ...
+  ... Passed --   4.2  5  244   85259  246
+Test (2C): Figure 8 (unreliable) ...
+  ... Passed --  36.3  5 1948 4175577  216
+Test (2C): churn ...
+  ... Passed --  16.6  5 4402 2220926 1766
+Test (2C): unreliable churn ...
+  ... Passed --  16.5  5  781  539084  221
+PASS
+ok      raft    142.357s
+$ 
+```
