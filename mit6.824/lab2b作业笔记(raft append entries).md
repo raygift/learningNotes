@@ -407,5 +407,19 @@ A：ApplyMsg 的注释明确了每个节点在日志提交后都需要发送appl
 
 在RPC handler 中接收到大于rf.currentTerm的 args.Term 时，无论是否接收日志（ApeendEntries RPC Handler中）或投票（RequestVote RPC Handler中），都需要更新本节点的term 号，因此需要在判断其他执行逻辑之前，首先记录下当前rf.currentTerm 和 args.Term，在结束处理前将rf.currentTerm =Max(rf.currentTerm, args.Term)
 
+### AppendEntries RPC Handler 中 更新rf.commitIndex 的bug
 
+在处理leader 发送来的 Heartbeat 请求时，在判断 prevLogIndex 与 prevLogTerm 后，只能说明 本节点与leader prevLogIndex 之前的entry 保持了一致，但prevLogIndex 之后的entry 仍有可能不一致，此时在处理 heartbeat 请求时，不能直接根据如下规则更新本节点的 commitIndex，否则可能导致本节点与leader 冲突的entry 被提交。
 
+> 5. If leaderCommit > commitIndex, set commitIndex =
+> min(leaderCommit, index of last new entry)
+
+解决办法是对AppendEntries RPC Handler 逻辑进行梳理，确保更新commitIndex 之前，完成了对RPC 请求参数的检查，并将通过检查的entries 追加到节点的rf.log里，这样便可以向请求方返回成功，也可以将节点commitIndex 更新到 leaderCommit与节点日志较小值；请求方收到RPC 响应成功后，便认为follower 与自己的日志已经同步到**matchIndex = args.PrevLogIndex + len(args.Entries)**，同时更新nextIndex为 **nextIndex = args.PrevLogIndex + len(args.Entires) +1 **
+
+____
+
+Q：leader 初始化nextIndex 的bug
+
+A：在判断收到足够的选票后，首先更新节点状态为leader，紧接着对nextIndex和matchIndex 进行初始化。不要在发送成为leader 的broadcast 后再进行nextIndex 的初始化，因为尝试发送AppendEntries 的goroutine 也在broadcast 后开始执行，有可能导致初始化之前发送了尝试使用错误的nextIndex 准备发送AppendEntries，而此时nextIndex 是错误的，args.PrevLogIndex=nextIndex-1也就是错误的，导致rf.log[args.prevLogIndex]索引溢出
+
+类似的bug 还会出现在 旧leader attempAppendEntries 时，由于被另一个网络分区的leader 更改了日志内容，但nextIndex 仍按照原来日志长度初始化，导致nextIndex 或 prevLogIndex 溢出，需要在attemptAppendEntries 和attemptHeartbeat 时，加锁后判断rf.state 是否仍为leader，避免调用 attemptxxx 之前释放锁，被修改日志内容和长度。
