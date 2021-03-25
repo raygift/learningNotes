@@ -156,6 +156,7 @@ Lock
 4 p = znode in C ordered just before n
 5 if exists(p, true) wait for watch event 
 6 goto 2
+
 Unlock
 1 delete(n)
 ```
@@ -165,15 +166,35 @@ Unlock
 释放锁与删除代表锁请求的znode n 一样简单。通过创建时使用的EPHEMERAL 标志，崩溃的进程会自动清理任意锁请求，或者释放他们持有的任意锁。
 
 综上，锁模式有如下优势：
-    1. znode 的搬迁只会引发一个client 被唤醒，因为每个znode 被确切的另一个client 监听，因此就不存在羊群效应；
+    1. znode 的删除只会引发一个client 被唤醒，因为每个znode 被确切的另一个client 监听，因此就不存在羊群效应；
     2. 没有轮询和超时；
     3. 因为我们实现锁的方式，我们可以通过浏览ZK 数据查看到锁争抢的数量，打断锁，以及调试锁的问题。
 
--
 **读写锁**
 
+为了实现读写锁，我们对上述锁过程稍作改动，将读锁和写锁区分开。释放锁的过程与全局锁的案例中一样。
 
+```
+Write Lock
+1 n = create(l + “/write-”, EPHEMERAL|SEQUENTIAL) 
+2 C = getChildren(l, false)
+3 if n is lowest znode in C, exit
+4 p = znode in C ordered just before n
+5 if exists(p, true) wait for event 
+6 goto 2
 
+Read Lock
+1 n = create(l + “/read-”, EPHEMERAL|SEQUENTIAL)
+2 C = getChildren(l, false)
+3 if no write znodes lower than n in C, exit
+4 p = write znode in C ordered just before n
+5 if exists(p, true) wait for event
+6 goto 3
+```
 
-**双障碍（double barrier）**
+这个锁程序与之前的锁稍有不同。写锁与没有羊群效应的简单锁只是命名上不同。然而读锁可能被共享，第3行和第4行与之前的逻辑有区别，因为只有更早的写锁znode 会阻止client 获取一个读锁。当有多个client 等到读锁时，随着序列号更低的"write-" znode被删除，多个client接到通知可能出现羊群效应；实际上这是一个预期中的行为，在可以获得锁时，所有试图读的client 都应该被唤醒。
+
+**双屏障（double barrier）**
+
+双屏障可以让client 同步计算的开始和结束。当加入barrier 的进程数量达到barrier 阈值时，进程开始他们的计算，并在完成计算后离开barrier。在ZK 中，使用一个znode 代表一个barrier，计作b。每个进程p 使用b 注册到实体上 - 注册通过创建一个b 的child znode 来实现，当准备好离开时取消注册 - 将b 下的child znode 删除。当b 的child znode 数量超过barrier 的阈值时，进程可以进入barrier。当所有进程将他们的children 删除时，进程可以离开barrier。我们使用watch 高效地等待进入和推出条件被满足。为了进入，进程对属于b 的ready 子znode 是否存在进行监听，ready 子znode 由进程创建，此进程使得children数量达到barrier 阈值。为了离开，进程监听特定child 的消失，只需要在这个特定znode 被删除时检查一次退出条件是否满足即可。
 
